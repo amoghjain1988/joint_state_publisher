@@ -31,12 +31,15 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import argparse
+import os
 import random
 import signal
 import sys
 import threading
 
 import rclpy
+
+import yaml
 
 from python_qt_binding.QtCore import pyqtSlot
 from python_qt_binding.QtCore import Qt
@@ -137,6 +140,17 @@ class JointStatePublisherGui(QMainWindow):
         self.ctr_button = QPushButton('Center', self)
         self.ctr_button.clicked.connect(self.centerEvent)
 
+        # Named-pose buttons (opt-in): if JSP_NAMED_POSES points at a YAML file of
+        # {pose_name: {joint: value}}, add one button per pose that snaps the
+        # sliders to it. No file -> no extra buttons (unchanged behaviour).
+        self.named_poses = self._load_named_poses()
+        self.pose_buttons = []
+        for pose_name in self.named_poses:
+            btn = QPushButton(pose_name, self)
+            btn.clicked.connect(
+                lambda _checked=False, n=pose_name: self.setPoseEvent(n))
+            self.pose_buttons.append(btn)
+
         # Scroll area widget contents - layout
         self.scroll_layout = FlowLayout()
 
@@ -155,6 +169,8 @@ class JointStatePublisherGui(QMainWindow):
         # Add buttons and scroll area to main layout
         self.main_layout.addWidget(self.rand_button)
         self.main_layout.addWidget(self.ctr_button)
+        for btn in self.pose_buttons:
+            self.main_layout.addWidget(btn)
         self.main_layout.addWidget(self.scroll_area)
 
         # central widget
@@ -250,6 +266,35 @@ class JointStatePublisherGui(QMainWindow):
             joint = joint_info['joint']
             joint_info['slider'].setValue(
                 self.valueToSlider(random.uniform(joint['min'], joint['max']), joint))
+
+    def setPoseEvent(self, pose_name):
+        """Snap the sliders to a named pose (clamped to each joint's limits)."""
+        self.jsp.get_logger().info("Setting pose '%s'" % pose_name)
+        pose = self.named_poses.get(pose_name, {})
+        for name, joint_info in self.joint_map.items():
+            if name not in pose:
+                continue
+            joint = joint_info['joint']
+            value = max(joint['min'], min(joint['max'], float(pose[name])))
+            joint_info['slider'].setValue(self.valueToSlider(value, joint))
+
+    def _load_named_poses(self):
+        """Load named poses from the YAML file named by JSP_NAMED_POSES, if set.
+
+        File format: {pose_name: {joint_name: position, ...}, ...}. Returns an
+        empty dict (no extra buttons) if the var is unset or the file is missing
+        / unreadable, so default behaviour is unchanged.
+        """
+        path = os.environ.get('JSP_NAMED_POSES')
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
+        except Exception as exc:  # noqa: BLE001 - never let a bad file break the GUI
+            self.jsp.get_logger().warn("could not load named poses: %s" % exc)
+            return {}
 
     def valueToSlider(self, value, joint):
         return int((value - joint['min']) * float(RANGE) / (joint['max'] - joint['min']))

@@ -49,6 +49,7 @@ from python_qt_binding.QtWidgets import QApplication
 from python_qt_binding.QtWidgets import QFormLayout
 from python_qt_binding.QtWidgets import QGridLayout
 from python_qt_binding.QtWidgets import QHBoxLayout
+from python_qt_binding.QtWidgets import QInputDialog
 from python_qt_binding.QtWidgets import QLabel
 from python_qt_binding.QtWidgets import QLineEdit
 from python_qt_binding.QtWidgets import QMainWindow
@@ -141,15 +142,16 @@ class JointStatePublisherGui(QMainWindow):
         self.ctr_button.clicked.connect(self.centerEvent)
 
         # Named-pose buttons (opt-in): if JSP_NAMED_POSES points at a YAML file of
-        # {pose_name: {joint: value}}, add one button per pose that snaps the
-        # sliders to it. No file -> no extra buttons (unchanged behaviour).
+        # {pose_name: {joint: value}}, add a "Save Pose..." button plus one button
+        # per saved pose that snaps the sliders to it. No file -> no extra buttons.
         self.named_poses = self._load_named_poses()
         self.pose_buttons = []
+        self.save_button = None
+        if os.environ.get('JSP_NAMED_POSES'):
+            self.save_button = QPushButton('Save Pose...', self)
+            self.save_button.clicked.connect(self.savePoseEvent)
         for pose_name in self.named_poses:
-            btn = QPushButton(pose_name, self)
-            btn.clicked.connect(
-                lambda _checked=False, n=pose_name: self.setPoseEvent(n))
-            self.pose_buttons.append(btn)
+            self.pose_buttons.append(self._make_pose_button(pose_name))
 
         # Scroll area widget contents - layout
         self.scroll_layout = FlowLayout()
@@ -169,6 +171,8 @@ class JointStatePublisherGui(QMainWindow):
         # Add buttons and scroll area to main layout
         self.main_layout.addWidget(self.rand_button)
         self.main_layout.addWidget(self.ctr_button)
+        if self.save_button is not None:
+            self.main_layout.addWidget(self.save_button)
         for btn in self.pose_buttons:
             self.main_layout.addWidget(btn)
         self.main_layout.addWidget(self.scroll_area)
@@ -277,6 +281,47 @@ class JointStatePublisherGui(QMainWindow):
             joint = joint_info['joint']
             value = max(joint['min'], min(joint['max'], float(pose[name])))
             joint_info['slider'].setValue(self.valueToSlider(value, joint))
+
+    def savePoseEvent(self, event):
+        """Prompt for a name, store the CURRENT sliders as a named pose, add a
+        button for it, and write the YAML back to disk."""
+        name, ok = QInputDialog.getText(self, 'Save Pose', 'Pose name:')
+        name = name.strip()
+        if not ok or not name:
+            return
+        pose = {}
+        for joint_name, joint_info in self.joint_map.items():
+            value = self.sliderToValue(joint_info['slider'].value(), joint_info['joint'])
+            pose[joint_name] = round(float(value), 6)
+        new = name not in self.named_poses
+        self.named_poses[name] = pose
+        self._save_named_poses()
+        if new:                                  # add a recall button live
+            btn = self._make_pose_button(name)
+            self.pose_buttons.append(btn)
+            # insert just after the Save button in the layout
+            idx = self.main_layout.indexOf(self.save_button) + len(self.pose_buttons)
+            self.main_layout.insertWidget(idx, btn)
+        self.jsp.get_logger().info("Saved pose '%s'" % name)
+
+    def _make_pose_button(self, pose_name):
+        """A recall button that snaps the sliders to the named pose."""
+        btn = QPushButton(pose_name, self)
+        btn.clicked.connect(
+            lambda _checked=False, n=pose_name: self.setPoseEvent(n))
+        return btn
+
+    def _save_named_poses(self):
+        """Write self.named_poses back to the JSP_NAMED_POSES YAML file."""
+        path = os.environ.get('JSP_NAMED_POSES')
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                yaml.safe_dump(self.named_poses, f, sort_keys=False)
+        except Exception as exc:  # noqa: BLE001 - never let a write error crash the GUI
+            self.jsp.get_logger().warn("could not save poses: %s" % exc)
 
     def _load_named_poses(self):
         """Load named poses from the YAML file named by JSP_NAMED_POSES, if set.

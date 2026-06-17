@@ -153,6 +153,25 @@ class JointStatePublisherGui(QMainWindow):
         for pose_name in self.named_poses:
             self.pose_buttons.append(self._make_pose_button(pose_name))
 
+        # Pose-editing buttons (opt-in, same gate as named poses). Each edit
+        # snapshots the sliders to an undo stack first, then mutates. The
+        # robot-specific 'Plant Wheels' action is loaded LAZILY from the optional
+        # companion module named by JSP_POSE_ACTION_MODULE (absent -> no button).
+        self.undo_stack = []
+        self.edit_buttons = []
+        if os.environ.get('JSP_NAMED_POSES'):
+            self._add_edit_button('Symmetrize L->R', self.symmetrizeEvent)
+            self._add_edit_button('Mirror L<->R', self.mirrorEvent)
+            self._add_edit_button('Flatten Twist', self.flattenTwistEvent)
+            self._add_edit_button('Zero Legs', self.zeroLegsEvent)
+            self.plant_fn = self._load_plant_action()
+            if self.plant_fn is not None:
+                self._add_edit_button('Plant Wheels', self.plantWheelsEvent)
+            # Undo is NOT wrapped (it IS the restore); placed last.
+            self.undo_button = QPushButton('Undo', self)
+            self.undo_button.clicked.connect(self.undoEvent)
+            self.edit_buttons.append(self.undo_button)
+
         # Scroll area widget contents - layout
         self.scroll_layout = FlowLayout()
 
@@ -173,6 +192,8 @@ class JointStatePublisherGui(QMainWindow):
         self.main_layout.addWidget(self.ctr_button)
         if self.save_button is not None:
             self.main_layout.addWidget(self.save_button)
+        for btn in self.edit_buttons:
+            self.main_layout.addWidget(btn)
         for btn in self.pose_buttons:
             self.main_layout.addWidget(btn)
         self.main_layout.addWidget(self.scroll_area)
@@ -270,6 +291,130 @@ class JointStatePublisherGui(QMainWindow):
             joint = joint_info['joint']
             joint_info['slider'].setValue(
                 self.valueToSlider(random.uniform(joint['min'], joint['max']), joint))
+
+    # ---- pose-editing helpers (shared by the edit buttons) ----
+
+    def _add_edit_button(self, label, handler):
+        btn = QPushButton(label, self)
+        btn.clicked.connect(handler)
+        self.edit_buttons.append(btn)
+
+    def _capture_pose(self):
+        """Current slider values, keyed by joint NAME (survives a URDF reload)."""
+        return {name: self.sliderToValue(ji['slider'].value(), ji['joint'])
+                for name, ji in self.joint_map.items()}
+
+    def _apply_pose(self, pose):
+        """Write a {name: value} dict to the sliders, clamped to each joint's own
+        limits. The RESTORE primitive — must NOT push to the undo stack."""
+        for name, ji in self.joint_map.items():
+            if name not in pose:
+                continue
+            joint = ji['joint']
+            value = max(joint['min'], min(joint['max'], float(pose[name])))
+            ji['slider'].setValue(self.valueToSlider(value, joint))
+
+    def _apply_edit(self, fn):
+        """Snapshot the sliders (for undo), then run the mutating edit `fn`."""
+        snap = self._capture_pose()
+        fn()
+        if snap != self._capture_pose():            # skip no-op edits
+            self.undo_stack.append(snap)
+            del self.undo_stack[:-50]               # cap depth
+
+    # L<->R joints that NEGATE under a true mirror (lateral/twist DOF); leg
+    # joints share the same +Y axis & limits so they mirror by plain copy.
+    _MIRROR_NEGATE = ('base_y', 'base_roll', 'base_yaw')
+
+    def symmetrizeEvent(self, event=None):
+        """Copy every L_* value onto its R_* twin (legs match the left side)."""
+        def edit():
+            pose = self._capture_pose()
+            new = dict(pose)
+            for name in pose:
+                if name.startswith('L_') and ('R_' + name[2:]) in self.joint_map:
+                    new['R_' + name[2:]] = pose[name]
+            self._apply_pose(new)
+        self.jsp.get_logger().info("Symmetrize L->R")
+        self._apply_edit(edit)
+
+    def mirrorEvent(self, event=None):
+        """Swap L_* <-> R_* (atomic from the snapshot); negate lateral/twist DOF."""
+        def edit():
+            pose = self._capture_pose()
+            new = dict(pose)
+            for name in pose:
+                if name.startswith('L_'):
+                    r = 'R_' + name[2:]
+                    if r in self.joint_map:
+                        new[name], new[r] = pose[r], pose[name]
+            for n in self._MIRROR_NEGATE:           # true mirror negates these
+                if n in new:
+                    new[n] = -new[n]
+            self._apply_pose(new)
+        self.jsp.get_logger().info("Mirror L<->R")
+        self._apply_edit(edit)
+
+    def flattenTwistEvent(self, event=None):
+        """Zero base_roll + base_yaw (remove sideways twist)."""
+        def edit():
+            pose = self._capture_pose()
+            for n in ('base_roll', 'base_yaw'):
+                if n in pose:
+                    pose[n] = 0.0
+            self._apply_pose(pose)
+        self.jsp.get_logger().info("Flatten twist")
+        self._apply_edit(edit)
+
+    def zeroLegsEvent(self, event=None):
+        """Zero the leg joints (hip/knee/ankle, both sides)."""
+        def edit():
+            pose = self._capture_pose()
+            for n in list(pose):
+                if any(k in n for k in ('hip', 'knee', 'ankle')):
+                    pose[n] = 0.0
+            self._apply_pose(pose)
+        self.jsp.get_logger().info("Zero legs")
+        self._apply_edit(edit)
+
+    def plantWheelsEvent(self, event=None):
+        """Robot-specific: set base_z so the lowest wheel sits on the ground,
+        via the lazily-loaded companion (pure: pose dict -> {base_z}). No I/O."""
+        if not self.joint_map.get('base_z'):
+            self.jsp.get_logger().warn("Plant Wheels: no 'base_z' slider")
+            return
+
+        def edit():
+            pose = self._capture_pose()
+            out = self.plant_fn(pose)               # {"base_z": value}
+            if 'base_z' in out:
+                pose['base_z'] = out['base_z']
+                self._apply_pose(pose)
+        self.jsp.get_logger().info("Plant wheels")
+        self._apply_edit(edit)
+
+    def undoEvent(self, event=None):
+        """Restore the slider values from before the last edit."""
+        if not self.undo_stack:
+            self.jsp.get_logger().info("Nothing to undo")
+            return
+        self._apply_pose(self.undo_stack.pop())
+
+    def _load_plant_action(self):
+        """Lazy-import the optional robot-specific plant_wheels(pose)->{base_z}.
+        Module path from JSP_POSE_ACTION_MODULE='pkg.module:function'. Absent or
+        unimportable -> None (no Plant Wheels button), never an error."""
+        spec = os.environ.get('JSP_POSE_ACTION_MODULE')
+        if not spec or ':' not in spec:
+            return None
+        mod_name, fn_name = spec.split(':', 1)
+        try:
+            import importlib
+            mod = importlib.import_module(mod_name)
+            return getattr(mod, fn_name)
+        except Exception as exc:  # noqa: BLE001 - optional; never break the GUI
+            self.jsp.get_logger().warn("plant action not loaded: %s" % exc)
+            return None
 
     def setPoseEvent(self, pose_name):
         """Snap the sliders to a named pose (clamped to each joint's limits)."""

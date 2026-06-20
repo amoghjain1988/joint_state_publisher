@@ -48,6 +48,7 @@ from python_qt_binding.QtGui import QFont
 from python_qt_binding.QtWidgets import QApplication
 from python_qt_binding.QtWidgets import QFormLayout
 from python_qt_binding.QtWidgets import QGridLayout
+from python_qt_binding.QtWidgets import QGroupBox
 from python_qt_binding.QtWidgets import QHBoxLayout
 from python_qt_binding.QtWidgets import QInputDialog
 from python_qt_binding.QtWidgets import QLabel
@@ -64,7 +65,7 @@ from joint_state_publisher.joint_state_publisher import JointStatePublisher
 from joint_state_publisher_gui.flow_layout import FlowLayout
 
 RANGE = 10000
-LINE_EDIT_WIDTH = 45
+LINE_EDIT_WIDTH = 60
 SLIDER_WIDTH = 200
 INIT_NUM_SLIDERS = 7  # Initial number of sliders to show in window
 
@@ -77,6 +78,67 @@ DEFAULT_SLIDER_HEIGHT = 64  # Is the combination of default heights in Slider
 # Calculate default minimums for window sizing
 MIN_WIDTH = SLIDER_WIDTH + DEFAULT_CHILD_MARGIN * 4 + DEFAULT_WINDOW_MARGIN * 2
 MIN_HEIGHT = DEFAULT_BTN_HEIGHT * 2 + DEFAULT_WINDOW_MARGIN * 2 + DEFAULT_CHILD_MARGIN * 2
+
+# Clean flat restyle for the panel — purely cosmetic, no behavior change.
+GUI_STYLESHEET = """
+QMainWindow, QWidget { background-color: #f4f5f7; color: #2b2f36; }
+QWidget { font-family: "Helvetica", "Segoe UI", sans-serif; font-size: 12px; }
+
+QGroupBox {
+    border: 1px solid #dcdfe4;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 10px;
+    background-color: #fbfcfd;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 12px;
+    padding: 0 6px;
+    color: #6b7480;
+    font-weight: 600;
+}
+
+QPushButton {
+    background-color: #ffffff;
+    border: 1px solid #cfd4db;
+    border-radius: 6px;
+    padding: 6px 12px;
+    min-height: 16px;
+}
+QPushButton:hover   { background-color: #eef4fd; border-color: #4a90d9; }
+QPushButton:pressed { background-color: #d8e6f8; border-color: #357abd; }
+
+QPushButton#primaryBtn {
+    background-color: #2f80ed; border: 1px solid #2f80ed; color: #ffffff; font-weight: 600;
+}
+QPushButton#primaryBtn:hover   { background-color: #2d76d6; }
+QPushButton#primaryBtn:pressed { background-color: #2769bf; }
+
+QPushButton#poseBtn {
+    background-color: #eef2f7; border: 1px solid #cdd5df; color: #34404d; font-weight: 600;
+}
+QPushButton#poseBtn:hover   { background-color: #e3ebf5; border-color: #4a90d9; }
+QPushButton#poseBtn:pressed { background-color: #d3e0f1; }
+
+QLineEdit {
+    background-color: #ffffff; border: 1px solid #d3d8df;
+    border-radius: 4px; padding: 2px 5px; color: #1f2933;
+}
+
+QSlider::groove:horizontal { height: 4px; background: #d6dbe1; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #2f80ed; border-radius: 2px; }
+QSlider::add-page:horizontal { background: #d6dbe1; border-radius: 2px; }
+QSlider::handle:horizontal {
+    background: #ffffff; border: 1px solid #9aa4b0;
+    width: 14px; margin: -6px 0; border-radius: 7px;
+}
+QSlider::handle:horizontal:hover { border-color: #2f80ed; }
+
+QScrollArea { border: none; background: transparent; }
+"""
+
 
 class Slider(QWidget):
     def __init__(self, name):
@@ -132,6 +194,7 @@ class JointStatePublisherGui(QMainWindow):
         self.joint_map = {}
 
         self.setWindowTitle(title)
+        self.setStyleSheet(GUI_STYLESHEET)
 
         # Button for randomizing the sliders
         self.rand_button = QPushButton('Randomize', self)
@@ -184,19 +247,40 @@ class JointStatePublisherGui(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setWidget(self.scroll_widget)
 
-        # Main layout
-        self.main_layout = QVBoxLayout()
+        # Top control band: compact labeled groups side by side (Actions / Edit
+        # pose / Named poses) instead of one tall column of full-width buttons.
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
 
-        # Add buttons and scroll area to main layout
-        self.main_layout.addWidget(self.rand_button)
-        self.main_layout.addWidget(self.ctr_button)
+        actions_group = QGroupBox("Actions")
+        actions_col = QVBoxLayout()
+        actions_col.setSpacing(6)
+        actions_col.addWidget(self.rand_button)
+        actions_col.addWidget(self.ctr_button)
         if self.save_button is not None:
-            self.main_layout.addWidget(self.save_button)
-        for btn in self.edit_buttons:
-            self.main_layout.addWidget(btn)
-        for btn in self.pose_buttons:
-            self.main_layout.addWidget(btn)
-        self.main_layout.addWidget(self.scroll_area)
+            self.save_button.setObjectName("primaryBtn")
+            actions_col.addWidget(self.save_button)
+        actions_col.addStretch(1)
+        actions_group.setLayout(actions_col)
+        controls_row.addWidget(actions_group)
+
+        if self.edit_buttons:
+            controls_row.addWidget(
+                self._button_grid("Edit pose", self.edit_buttons, columns=2))
+
+        if self.pose_buttons:
+            for btn in self.pose_buttons:
+                btn.setObjectName("poseBtn")
+            controls_row.addWidget(
+                self._button_grid("Named poses", self.pose_buttons, columns=2))
+
+        controls_row.addStretch(1)
+
+        # Main layout: control band on top, sliders (scroll area) filling below.
+        self.main_layout = QVBoxLayout()
+        self.main_layout.setSpacing(8)
+        self.main_layout.addLayout(controls_row)
+        self.main_layout.addWidget(self.scroll_area, 1)
 
         # central widget
         self.central_widget = QWidget()
@@ -298,6 +382,16 @@ class JointStatePublisherGui(QMainWindow):
         btn = QPushButton(label, self)
         btn.clicked.connect(handler)
         self.edit_buttons.append(btn)
+
+    def _button_grid(self, title, buttons, columns=2):
+        """Lay buttons out in a wrapping grid inside a titled group box."""
+        group = QGroupBox(title)
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        for i, btn in enumerate(buttons):
+            grid.addWidget(btn, i // columns, i % columns)
+        group.setLayout(grid)
+        return group
 
     def _capture_pose(self):
         """Current slider values, keyed by joint NAME (survives a URDF reload)."""
@@ -413,7 +507,14 @@ class JointStatePublisherGui(QMainWindow):
             mod = importlib.import_module(mod_name)
             return getattr(mod, fn_name)
         except Exception as exc:  # noqa: BLE001 - optional; never break the GUI
-            self.jsp.get_logger().warn("plant action not loaded: %s" % exc)
+            # self.jsp may not exist yet (this runs from __init__), so guard it —
+            # an unimportable action must degrade to "no button", never a crash.
+            msg = "plant action not loaded: %s" % exc
+            jsp = getattr(self, "jsp", None)
+            if jsp is not None:
+                jsp.get_logger().warn(msg)
+            else:
+                print("[joint_state_publisher_gui] " + msg)
             return None
 
     def setPoseEvent(self, pose_name):
